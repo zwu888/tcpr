@@ -994,7 +994,7 @@ The **ancillary TCP services** beside a device — embedded **HTTP web server**,
 ```mermaid
 flowchart TB
     subgraph SUP["Supervisory / coordination plane — ms..s (consensus & VS fit)"]
-        VS["Virtual synchrony<br/>replicate controller as a<br/>state machine; view change on fault"]:::fit
+        VS["Virtual synchrony (Isis → Derecho)<br/>replicate controller as a<br/>state machine; view change on fault"]:::fit
         RAFT["Raft / Paxos<br/>leader election · split-brain<br/>vPLC cluster · config · SCADA"]:::fit
     end
     subgraph RT["Real-time control plane — µs..ms (NO consensus)"]
@@ -1022,6 +1022,7 @@ flowchart TB
 - **Leader election / split-brain avoidance** in a redundant pair — a **consensus-flavored** problem; solved with the sync link plus arbitration (sometimes a third quorum/arbiter device).
 - **Virtualized / soft-PLC clusters** — where **Raft (etcd/ZooKeeper-style)** is genuinely used today for membership, config, and replicated non-RT state. Deterministic I/O still egresses via TSN/PROFINET from the *active* instance.
 - **Cell/line coordination, recipe & config management, SCADA aggregation** — soft real-time → Raft or a group-communication toolkit (Spread/JGroups).
+- **Modern high-performance virtual synchrony — Derecho.** An RDMA-based C++ library from Cornell (the **same group/lineage as TCPR**) that combines virtual synchrony with Paxos-grade durability at data-center speeds (tens–hundreds of Gbps, microsecond-class multicast). For PROFINET it fits the **edge/vPLC controller-replication** plane: keep hot-standby or active replicas consistent fast enough that the **data-hold/watchdog window** needed to mask a view change stays small. It is still a **supervisory-plane** tool — fast reconfiguration, *not* per-cycle RT agreement — and its RDMA fabric is distinct from the PROFINET/TSN I/O network. (The **Cascade** object store builds a versioned key-value/tensor store on top, relevant for edge-AI + control.)
 
 ### 9.4 How failover latency gets masked
 
@@ -1155,7 +1156,8 @@ Shows a stateful server that survives its **own** restart by persisting connecti
 - K. P. Birman, T. A. Joseph. *Exploiting Virtual Synchrony in Distributed Systems*, SOSP 1987 — **Isis** (the lineage TCPR descends from).
 - K. P. Birman. *Reliable Distributed Systems: Technologies, Web Services, and Applications*, Springer, 2005.
 - K. Birman, R. van Renesse. *Reliable Distributed Computing with the Isis Toolkit*, IEEE CS Press, 1994.
-- Toolkits: **Spread**, **JGroups**, **Horus/Ensemble** — practical group-communication/virtual-synchrony implementations.
+- S. Jha, J. Behrens, T. Gkountouvas, M. Milano, W. Song, E. Tremel, R. van Renesse, S. Zink, K. P. Birman. *Derecho: Fast State Machine Replication for Cloud Services*, **ACM TOCS 36(2), 2019** — modern RDMA-based virtual synchrony + Paxos durability (Cornell; same group as TCPR). Open-source C++ library (`github.com/Derecho-Project/derecho`); **Cascade** builds a versioned object store on top.
+- Toolkits: **Derecho**, **Spread**, **JGroups**, **Horus/Ensemble** — practical group-communication/virtual-synchrony implementations.
 
 ### B.4 PROFINET, real-time & redundancy
 - **IEC 61158 / IEC 61784-2** — PROFINET fieldbus specification (RT/IRT communication, ARs/CRs).
