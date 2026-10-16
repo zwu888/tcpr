@@ -33,6 +33,7 @@ aliases:
     - [[#7.9 How many VMs do you need?]]
     - [[#7.10 `examples/relay/` script reference]]
 - [[#8. TCPR vs PROFINET — can it manage communication relationships?]]
+- [[#9. Consensus & Virtual Synchrony for PROFINET Fault Tolerance]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
@@ -974,6 +975,64 @@ The **ancillary TCP services** beside a device — embedded **HTTP web server**,
 
 > [!note] Bottom line
 > Wrong layer (L2/RPC vs TCP), wrong timing domain (hard real-time vs best-effort), wrong deployment (embedded endpoints vs Linux middlebox). For AR/CR availability, reach for **MRP, S2/R1/R2, or PRP/HSR** — not TCPR.
+
+---
+
+## 9. Consensus & Virtual Synchrony for PROFINET Fault Tolerance
+
+> [!abstract] The decisive principle: which plane?
+> Consensus (Paxos/Raft) and **virtual synchrony** belong on the **supervisory/coordination plane**, *never* in the hard real-time control loop. They trade **latency for consistency under uncertainty** — needing communication *rounds* whose worst-case timing can't meet microsecond deadlines. Hard real-time control instead buys availability with **redundancy that requires no decision**. *(Fittingly, TCPR itself descends from the virtual-synchrony lineage — Birman's group at Cornell.)*
+
+### 9.1 Separate the two planes
+
+| Plane | Timing | Fault-tolerance style that works |
+|---|---|---|
+| **Real-time control** (cyclic RT/IRT I/O) | 1 ms → 250 µs (IRT 31.25 µs); watchdog ~3 cycles | **Spatial redundancy + fail-silent** — *no agreement round-trips* |
+| **Supervisory / coordination** (controller replication, config, SCADA, orchestration) | ms–seconds, soft real-time | **Consensus / virtual synchrony** fit here |
+
+```mermaid
+flowchart TB
+    subgraph SUP["Supervisory / coordination plane — ms..s (consensus & VS fit)"]
+        VS["Virtual synchrony<br/>replicate controller as a<br/>state machine; view change on fault"]:::fit
+        RAFT["Raft / Paxos<br/>leader election · split-brain<br/>vPLC cluster · config · SCADA"]:::fit
+    end
+    subgraph RT["Real-time control plane — µs..ms (NO consensus)"]
+        PRP["PRP / HSR / 802.1CB<br/>seamless frame duplication<br/>zero recovery, no decision"]:::no
+        MRP["MRP ring redundancy<br/>(media faults, ~<=200 ms)"]:::no
+        PS["PROFIsafe<br/>fail-safe (not BFT)"]:::no
+    end
+    VS -. "keeps backups consistent" .-> HOLD
+    HOLD["AR data-hold / watchdog time<br/>masks switchover + view change"]:::bridge
+    HOLD --> RT
+    classDef fit fill:#e0f7e9,stroke:#2a7;
+    classDef no fill:#ffe0e0,stroke:#c33;
+    classDef bridge fill:#e8eeff,stroke:#46c;
+```
+
+### 9.2 Why Paxos/Raft/VS cannot live in the RT data path
+
+1. **Latency math doesn't close.** A Raft commit is ~1 RTT to a majority in steady state; leader election on failover is an *election timeout* (typically 150–300 ms in real deployments, bounded below by failure detection). PROFINET must deliver fresh data every 250 µs–1 ms — you cannot run a quorum round-trip per cycle, and an election blows past the AR watchdog many times over.
+2. **Determinism.** Consensus guarantees *eventual* progress (liveness under partial synchrony), not *bounded-time* progress. Control loops need hard bounds.
+3. **PROFINET uses duplication, not agreement.** **PRP/HSR (IEC 62439-3)** sends each frame over two independent paths; the receiver takes the first and discards the duplicate → **zero recovery time, no protocol decision**. **IEEE 802.1CB (FRER)** generalizes this for TSN. **MRP** handles ring media faults (~≤200 ms, only where that gap is tolerable). None are consensus.
+
+### 9.3 Where consensus / virtual synchrony genuinely belong
+
+- **Redundant controller state sync (hot standby).** PROFINET **system redundancy S2/R1/R2** keeps a backup IO-Controller ready; keeping primary+backup PLC state consistent is a **replication problem** — the home turf of virtual synchrony (feed replicas the same *ordered* inputs; a **view change** promotes a survivor). Vendors (e.g. Siemens S7-1500R/H) implement this as tightly-coupled, bounded-time sync over a **dedicated redundancy link**, not general-purpose Paxos — but it's the same conceptual family.
+- **Leader election / split-brain avoidance** in a redundant pair — a **consensus-flavored** problem; solved with the sync link plus arbitration (sometimes a third quorum/arbiter device).
+- **Virtualized / soft-PLC clusters** — where **Raft (etcd/ZooKeeper-style)** is genuinely used today for membership, config, and replicated non-RT state. Deterministic I/O still egresses via TSN/PROFINET from the *active* instance.
+- **Cell/line coordination, recipe & config management, SCADA aggregation** — soft real-time → Raft or a group-communication toolkit (Spread/JGroups).
+
+### 9.4 How failover latency gets masked
+
+The device's **data-hold / watchdog time** lets the IO-Device keep using the last valid outputs for a few cycles after losing the primary. That window is exactly what a VS **view change** or an S2 **bumpless switchover** must complete within. *Virtual synchrony keeps the backups consistent; PROFINET's data-hold time + S2 AR bridges the gap.*
+
+### 9.5 Caveats
+
+> [!warning] Safety ≠ consensus
+> Industrial safety uses **PROFIsafe** (IEC 61784-3, "black channel": CRC + sequence number + timeout → fail to a *safe state*). That is **fail-safe/fail-silent**, not Byzantine agreement. Classic Paxos/Raft tolerate **crash** faults, not Byzantine; for corrupted-but-alive nodes PROFINET relies on fail-silent design + PROFIsafe, not BFT.
+
+> [!note] Bottom line
+> **RT/IRT plane:** PRP/HSR (/802.1CB) for seamless redundancy, MRP for rings — *no consensus in the data path, by design.* **Controller-replication & coordination plane:** virtual synchrony for replicating the controller as a state machine (TCPR's ancestor), Raft/Paxos for leader election/split-brain and vPLC clusters. Size **data-hold/watchdog times** to make failover invisible to the AR.
 
 ---
 
