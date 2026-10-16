@@ -35,6 +35,7 @@ aliases:
 - [[#8. TCPR vs PROFINET — can it manage communication relationships?]]
 - [[#9. Consensus & Virtual Synchrony for PROFINET Fault Tolerance]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
+- [[#Appendix B — References & Standards]]
 - [[#Glossary]]
 
 ---
@@ -1130,6 +1131,50 @@ Shows a stateful server that survives its **own** restart by persisting connecti
 
 ### A.7 `src/benchmark.c`, `examples/`
 `benchmark.c` is a throughput harness (bulk generate/discard via the same `-g`/`-d` flags seen in `chat.c`). The `examples/recover` and `examples/migrate` shell scripts wire up network namespaces + a bridge and invoke these tools — see [[#The demo (`examples/recover`)]].
+
+---
+
+## Appendix B — References & Standards
+
+> [!info] Scope
+> Citable sources for the TCPR design and for the PROFINET / fault-tolerance claims in [[#8. TCPR vs PROFINET — can it manage communication relationships?]] and [[#9. Consensus & Virtual Synchrony for PROFINET Fault Tolerance]].
+
+### B.1 TCPR & TCP connection recovery
+- R. Surton, K. Birman, et al. **TCPR** project — Cornell. Project page: `http://www.cs.cornell.edu/~burgess/tcpr/` (design, repository, research).
+- R. Stewart (ed.). **SCTP**, RFC 4960 — multihoming/failover as a transport-layer alternative to TCPR-style recovery.
+- QUIC — J. Iyengar, M. Thomson (eds.). **RFC 9000**, *QUIC: A UDP-Based Multiplexed and Secure Transport* (connection migration; the modern alternative noted in [[#5. Ideal Use Cases]]).
+
+### B.2 Consensus & replication
+- L. Lamport. *The Part-Time Parliament*, ACM TOCS 16(2), 1998 — **Paxos**. Also *Paxos Made Simple*, 2001.
+- D. Ongaro, J. Ousterhout. *In Search of an Understandable Consensus Algorithm (Extended Version)*, USENIX ATC 2014 — **Raft**.
+- M. Castro, B. Liskov. *Practical Byzantine Fault Tolerance*, OSDI 1999 — **PBFT** (contrast: crash vs Byzantine).
+- F. B. Schneider. *Implementing Fault-Tolerant Services Using the State Machine Approach: A Tutorial*, ACM Computing Surveys, 1990.
+- M. J. Fischer, N. A. Lynch, M. S. Paterson. *Impossibility of Distributed Consensus with One Faulty Process (FLP)*, JACM 1985 — why liveness needs timing assumptions (the basis of [[#9.2 Why Paxos/Raft/VS cannot live in the RT data path]]).
+
+### B.3 Virtual synchrony & group communication
+- K. P. Birman, T. A. Joseph. *Exploiting Virtual Synchrony in Distributed Systems*, SOSP 1987 — **Isis** (the lineage TCPR descends from).
+- K. P. Birman. *Reliable Distributed Systems: Technologies, Web Services, and Applications*, Springer, 2005.
+- K. Birman, R. van Renesse. *Reliable Distributed Computing with the Isis Toolkit*, IEEE CS Press, 1994.
+- Toolkits: **Spread**, **JGroups**, **Horus/Ensemble** — practical group-communication/virtual-synchrony implementations.
+
+### B.4 PROFINET, real-time & redundancy
+- **IEC 61158 / IEC 61784-2** — PROFINET fieldbus specification (RT/IRT communication, ARs/CRs).
+- **IEC 61784-3** / **PROFIsafe** profile — functional safety "black channel" (CRC + sequence + timeout → safe state). *(Safety ≠ consensus — [[#9.5 Caveats]].)*
+- **IEC 62439-2** — **MRP** (Media Redundancy Protocol), ring recovery.
+- **IEC 62439-3** — **PRP** (Parallel Redundancy Protocol) & **HSR** (High-availability Seamless Redundancy), zero-recovery frame duplication.
+- PI (PROFIBUS & PROFINET International) — **System Redundancy S2 / R1 / R2** application guidelines.
+- Vendor: Siemens **S7-1500R/H** redundant controllers (dedicated redundancy link, bumpless switchover) — a concrete S2/R-class implementation.
+
+### B.5 Time-Sensitive Networking (TSN)
+- **IEEE 802.1CB** — Frame Replication and Elimination for Reliability (**FRER**); generalizes PRP/HSR for TSN.
+- **IEEE 802.1Qbv** — Enhancements for Scheduled Traffic (time-aware shaper).
+- **IEEE 802.1AS** — timing and synchronization (gPTP).
+- IEC/IEEE 60802 — TSN profile for industrial automation.
+
+### B.6 Linux / implementation
+- **netfilter / iptables** & the **xtables** extension API — the hook/target framework TCPR plugs into (`module/`, `libxt_TCPR.c`).
+- Linux **network namespaces** & **veth/bridge** — the single-host demo topology ([[#7.9 How many VMs do you need?]]).
+- **KVM/QEMU** + **cloud-init (NoCloud)** — the VM sandbox harness ([[#7.8 Running it safely — kernel module + VM sandbox]]).
 
 ---
 
