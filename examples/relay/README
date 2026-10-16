@@ -10,14 +10,19 @@ Topology (see ../recover for the same style):
     [ peer netns 192.0.2.2 ]  <--bridge-->  [ application netns 192.0.2.1 ]
       nc sender / receiver        TCPR           tcpr-bridge (recoverable)
 
-Prerequisites: the userspace tools and kernel module are built and installed
-(see ../../README), and you are root.
+Prerequisites: the userspace tools are built and installed (see ../../README),
+and you are root.
+
+The kernel module must match the RUNNING kernel. If `modinfo tcpr` is missing
+or shows the wrong vermagic, (re)build and install it first:
+
+  sudo ./install-module       # builds tcpr.ko for `uname -r`, installs, depmod
 
 Steps (use several terminals):
 
   # terminal 0 (host)
   ./setup-network
-  ./setup-tcpr
+  ./setup-tcpr                # loads the module (modprobe) + installs rules
   ./make-payload 200M        # writes /tmp/in.dat and prints its sha256
 
   # terminal 1 - the recoverable relay
