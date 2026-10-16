@@ -607,6 +607,49 @@ flowchart LR
 
 The demo `bridge.c` was built for: a stateful relay crashes mid-transfer and both **unmodified `nc`** clients survive; a checksum proves no byte was lost.
 
+**Network topology** (what `examples/relay/setup-network` + `setup-tcpr` build):
+
+```mermaid
+flowchart TB
+    subgraph PEERNS["netns: peer — 192.0.2.2"]
+        SND["nc sender<br/>&lt; /tmp/in.dat"]
+        RCV["nc receiver<br/>&gt; /tmp/out.dat"]
+        PE["eth0 (veth)"]
+        SND --- PE
+        RCV --- PE
+    end
+
+    subgraph HOST["host network namespace (TCPR module loaded)"]
+        PVE["peereth (veth)"]
+        BR{{"bridge: tcpr<br/>192.0.2.3/24"}}
+        AVE["applicationeth (veth)"]
+        IPT["iptables -t mangle FORWARD<br/>--physdev-in application → TCPR --addr 192.0.2.1<br/>--physdev-out application → TCPR"]
+        PVE --- BR
+        AVE --- BR
+        BR -. "bridged FORWARD packets<br/>pass through TCPR target" .- IPT
+    end
+
+    subgraph APPNS["netns: application — 192.0.2.1"]
+        AE["eth0 (veth)"]
+        BRG["tcpr-bridge :8888<br/>state → /var/tmp/tcpr-bridge-*.state"]
+        AE --- BRG
+    end
+
+    PE === PVE
+    AE === AVE
+
+    CTRL["control plane:<br/>TCPR_HOST=192.0.2.2 PORT=7777<br/>tcpr-get | ack | put | print"]
+    CTRL -. "UDP, intercepted by the<br/>--physdev-in application -p udp rule" .-> IPT
+
+    classDef svc fill:#eef7ff,stroke:#3a7;
+    classDef net fill:#f7f7f7,stroke:#999;
+    class BRG,SND,RCV svc;
+    class BR,PVE,AVE,AE,PE net;
+```
+
+> [!note] How the control packets reach the module
+> `tcpr-bridge` sends UDP to `192.0.2.2:7777`. That address just needs to **route out through the bridge** so the `--physdev-in application -p udp -j TCPR` rule catches it — the module intercepts the UDP, reads/merges the `tcpr_ip4`, and replies. The port/host are otherwise arbitrary.
+
 ```sh
 # host
 cd examples/recover && sudo ./setup-network && sudo ./setup-tcpr
