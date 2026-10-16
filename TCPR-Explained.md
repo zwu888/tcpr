@@ -30,7 +30,8 @@ aliases:
 - [[#6. Known Bugs / Rough Edges]]
 - [[#7. Building Non-Trivial Demos]]
     - [[#7.8 Running it safely — kernel module + VM sandbox]]
-    - [[#7.9 `examples/relay/` script reference]]
+    - [[#7.9 How many VMs do you need?]]
+    - [[#7.10 `examples/relay/` script reference]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
@@ -852,7 +853,53 @@ sudo -i; cd /root/tcpr/examples/relay; ./setup-network && ./setup-tcpr && ...
 # host, when done: ./vm-destroy
 ```
 
-### 7.9 `examples/relay/` script reference
+### 7.9 How many VMs do you need?
+
+> [!tip] One VM covers every demo
+> All TCPR examples build their topology from **Linux network namespaces + a bridge inside a single kernel**, not separate machines. The `peer`, `application`, and TCPR middlebox are all netns on one host, and the module loads into that one kernel — so `vm-setup` boots exactly **one** guest and that is sufficient for everything, including migration (which only *looks* multi-host but is really multi-namespace).
+
+| Demo | Topology | VMs |
+|------|----------|-----|
+| `examples/recover` | `application` + `peer` netns over a bridge | **1** |
+| Demo 1 — crash-proof relay | 2 netns + `tcpr-bridge` | **1** |
+| Demo 2 — throughput/failover | 2 netns | **1** |
+| Demo 4 — front a real service | 2 netns | **1** |
+| Demo 3 — migration (`examples/migrate`) | `peer` + `application1/2` + `tcpr1/2` netns + Open vSwitch | **1** |
+
+**When you'd want more than one VM** — only for a *genuinely distributed* demo (real separate kernels / failure domains), which is about realism, not correctness:
+- **3 VMs** — `peer`, `tcpr-gateway`, `application` as distinct hosts (middlebox as a real network hop).
+- **+1 VM** — a second gateway to demo **HA / middlebox-is-a-SPOF** failover.
+- **+1 VM per replica** — cross-machine migration/replication.
+
+```mermaid
+flowchart LR
+    subgraph OPT1["Recommended: 1 VM (namespaces)"]
+        direction TB
+        K["single guest kernel + TCPR module"]
+        subgraph NS["network namespaces over a bridge"]
+            A1["application"]:::ns
+            P1["peer"]:::ns
+            G1["tcpr middlebox"]:::ns
+        end
+        K --- NS
+    end
+
+    subgraph OPT2["Optional: multi-VM (distributed, for realism)"]
+        direction LR
+        VP["VM: peer"]:::vm
+        VG["VM: tcpr-gateway"]:::vm
+        VA["VM: application"]:::vm
+        VG2["VM: gateway #2<br/>(HA / SPOF demo)"]:::vm2
+        VP --- VG --- VA
+        VG -. "failover" .- VG2
+    end
+
+    classDef ns fill:#eef7ff,stroke:#3a7;
+    classDef vm fill:#f4f4f4,stroke:#888;
+    classDef vm2 fill:#fff4e0,stroke:#d90,stroke-dasharray:4 3;
+```
+
+### 7.10 `examples/relay/` script reference
 
 The crash-proof relay demo ([[#7.3 Demo 1 — Crash-proof relay with end-to-end integrity check *(recommended)*]]) ships as runnable scripts:
 
