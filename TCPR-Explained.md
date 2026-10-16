@@ -85,6 +85,59 @@ TCPR sits in the network path. It rewrites sequence numbers, ports, and addresse
 
 ## Code Layout
 
+### Component architecture
+
+How the source files map onto the running system, layer by layer:
+
+```mermaid
+flowchart TB
+    subgraph US["Userspace"]
+        direction TB
+        subgraph TOOLS["control tools (src/) — tcpr_ip4 stream filters"]
+            T1["get · put · print"]
+            T2["ack · done · kill · bind"]
+            UTIL["util.c<br/>connect_to_tcpr / get_tcpr_state"]
+        end
+        subgraph APPS["demo apps (src/)"]
+            A1["tcpr-chat"]
+            A2["tcpr-bridge"]
+            A3["tcpr-benchmark"]
+        end
+        IPT["libxt_TCPR.c<br/>iptables -j TCPR --addr"]
+    end
+
+    subgraph HDR["Shared headers (include/tcpr/) — #ifdef __KERNEL__"]
+        H1["types.h<br/>tcpr_hard · tcpr · tcpr_ip4"]
+        H2["filter.h<br/>verdicts + API"]
+    end
+
+    subgraph KN["Kernel module (module/)"]
+        direction TB
+        HOOK["netfilter hooks<br/>LOCAL_IN | LOCAL_OUT"]
+        TG["module.c: tcpr_tg<br/>(xtables target)"]
+        subgraph DISP["dispatch (module.c)"]
+            D1["tcpr_tg_application"]
+            D2["tcpr_tg_peer"]
+            D3["tcpr_tg_update"]
+        end
+        CORE["filter.c<br/>tcpr_filter / _peer / _update<br/>acknowledge / recover / reset"]
+        STATE[("connection list<br/>tcpr_ip4 + spinlock<br/>keyed by 5-tuple + netns")]
+        INJ["inject_ip / inject_tcp / inject_update"]
+        HOOK --> TG --> DISP --> CORE --> STATE
+        CORE --> INJ
+    end
+
+    APPS -. "UDP tcpr_ip4 (control)" .-> D3
+    TOOLS -. "UDP tcpr_ip4 (get/put)" .-> D3
+    IPT -. "installs rules that invoke" .-> HOOK
+    TOOLS --- UTIL
+    US -.->|compiles against| HDR
+    KN -.->|compiles against| HDR
+
+    classDef store fill:#f4f4f4,stroke:#888,stroke-dasharray:4 3;
+    class STATE store;
+```
+
 ### `include/tcpr/` — shared headers (kernel + userspace via `#ifdef __KERNEL__`)
 
 - **`types.h`** — core state structures:
