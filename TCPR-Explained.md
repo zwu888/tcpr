@@ -585,6 +585,35 @@ A compelling demo therefore needs one of:
 
 The existing `examples/recover/setup-network` (two netns — `application`, `peer` — over a bridge, with the TCPR module on the host) is the right sandbox for all of these.
 
+**Division of responsibility on crash:**
+
+```mermaid
+flowchart TB
+    CRASH([Application process crashes]):::bad
+
+    CRASH --> R["✅ TCPR restores automatically"]:::tcpr
+    CRASH --> L["❌ Lost — app must handle"]:::app
+
+    R --> R1["TCP connection (4-tuple)"]
+    R --> R2["Sequence spaces via delta"]
+    R --> R3["Peer's buffered data<br/>(retransmitted past hard.ack)"]
+    R --> R4["Negotiated options<br/>MSS / WS / SACK"]
+
+    L --> L1["App memory & variables"]
+    L --> L2["Position in the stream<br/>(e.g. file offset)"]
+    L --> L3["Un-flushed app buffers"]
+
+    L --> FIX{{"Demo must bridge this gap"}}:::fix
+    FIX --> F1["Persist position<br/>(tcpr-bridge mmap state)"]
+    FIX --> F2["Resume-from-scratch OK<br/>(tcpr-chat -g generator)"]
+    FIX --> F3["Crash a different component<br/>than the data source"]
+
+    classDef bad fill:#ffe0e0,stroke:#c33;
+    classDef tcpr fill:#e0f7e9,stroke:#2a7;
+    classDef app fill:#fff4e0,stroke:#d90;
+    classDef fix fill:#e8eeff,stroke:#46c;
+```
+
 ### 7.2 Demo topology
 
 ```mermaid
