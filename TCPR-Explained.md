@@ -28,6 +28,7 @@ aliases:
 - [[#4. Userspace Control Protocol & Demo]]
 - [[#5. Ideal Use Cases]]
 - [[#6. Known Bugs / Rough Edges]]
+- [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
 ---
@@ -566,6 +567,103 @@ Because `recover` reuses the identical 4-tuple, the new SYN hits the **existing*
 > - **Use-after-free race:** `connection_done` frees the `connection` while code still holds `c->tcpr_lock`, which lives *inside* the freed struct (`/* XXX race */` comments at module.c:301, 350, 411).
 > - **Peer path never uses `NF_ACCEPT`:** `tcpr_tg_peer` relies on drop-original + `inject_ip` copy; the default `verdict = NF_DROP` is never overwritten.
 > - **Kernel-API churn:** hand-patched "Fix" comments around `ip_local_out` and namespace handling indicate sensitivity to kernel version.
+
+---
+
+## Appendix A — File-by-File Code Deep Dive
+
+> [!info] Scope
+> Sections 1–4 explain the *concepts*. This appendix walks every source file **function by function** with the exact behavior and gotchas, so you can read the tree top to bottom.
+
+### A.1 `module/filter.c` — the portable core logic
+
+Compiles both in-kernel and in userspace (no kernel-only calls), so the same algorithm is testable off-target.
+
+**`shorten(uint32_t n)`** (lines 10-13)
+```c
+return (n >> 16) + (n & 0xffff);
+```
+Folds a 32-bit accumulator into 16 bits for **incremental one's-complement checksum** updates. Used everywhere a header field is rewritten so the TCP/IP checksum can be patched instead of recomputed from scratch. The idiom `h->check = ~shorten(shorten(check))` folds twice (to absorb a carry out of the first fold) and complements.
+
+**TCP option normalization** (the `while` loop at the top of both filters)
+- Known options (`MSS`, `SACK`, `SACK_PERM`, `TIMESTAMP`, `WINDOW`, `NOP`) are skipped (`opt += opt[1]`).
+- **Unknown** options are overwritten with `NOP` bytes and the checksum is invalidated (`h->check = 0`) so the stack recomputes it. This keeps the option space predictable across recovery — TCPR only knows how to replay the options it understands.
+- In `tcpr_filter_peer`, the same loop *records* the peer's `MSS` → `hard.peer.mss`, window scale → `hard.peer.ws` (stored `+1` so `0` means "absent"), and `SACK_PERM` → `hard.peer.sack_permitted`, and **rewrites SACK blocks by `+delta`** so selective-ack ranges stay valid in the app's space.
+
+**`tcpr_filter(t, h, size)`** (lines 15-108) — application → peer. Covered in [[#1.2 Detecting a restart & computing `delta`]]. Full field map:
+- line 41-44: `rst` → mark `failed`, drop.
+- line 46-50: rewrite source port to `hard.port` (stable port).
+- line 52-53: record `win`; compute `t->seq` = next byte the app will send (accounts for SYN +1 and payload).
+- line 55-60: FIN handling (sets `t->fin` in peer space; failure if not `done_writing`).
+- line 62-78: SYN handling → recover vs. first-connection (the core branch).
+- line 80-85: `syn_sent` bookkeeping; replay `TCPR_RESET` if `failed`.
+- line 87-99: record `ack`; advance/clamp to `hard.ack` (suppress pure acks that would leak past the checkpoint).
+- line 101-107: rewrite `seq` by `-delta`, fix checksum, deliver.
+
+**`tcpr_filter_peer(t, h, size)`** (lines 110-202) — peer → application.
+- line 159-163: rewrite dest port back to the app's live `port`.
+- line 167-172: on SYN, latch ports and `hard.ack = peer_ISN + 1`.
+- line 174-177: record peer FIN seq.
+- line 179-196: on ACK, record `peer.ack`/`have_ack`, test the `done` condition, detect **peer-side recovery** (`syn_sent && !syn` → compute `delta`, return `TCPR_RECOVER`), and rewrite `ack_seq` by `+delta`.
+- returns `TCPR_DROP` if `failed`, else `TCPR_DELIVER`.
+
+**`tcpr_update(t, u)`** (lines 204-225) — merge control state.
+- If the caller's `u->port == 0` → it's a **GET**: copy live state into `u`, `TCPR_DELIVER` (reply).
+- Otherwise **PUT**: copy `u->hard` + `port`/`done`/`failed` into `t`, then decide: no peer ack yet → `DROP`; failed → `RESET`; `hard.ack` advanced → `ACKNOWLEDGE` (emit an ack on the app's behalf); unchanged → `DROP`.
+
+**`tcpr_acknowledge` / `tcpr_recover` / `tcpr_reset`** (lines 227-292) — packet synthesizers that only fill a `tcphdr` (the module wraps IP + checksums). `acknowledge` emits a bare ACK at the checkpoint and recomputes `done`; `recover` builds the fake SYN/ACK replaying saved options (see [[#1.3 Synthesizing the handshake — `tcpr_recover`]]); `reset` emits a RST at `t->ack`.
+
+### A.2 `module/module.c` — kernel glue (xtables target)
+
+- **`struct connection`** (lines 20-26): the `tcpr_ip4` state + `net_ns` + external `address` + a per-connection `spinlock_t`. Held in a global `connections` list guarded by `connections_lock` (rwlock).
+- **`fix_checksums`** (lines 36-49): patch both IP and TCP checksums when an address is rewritten (NAT).
+- **`lookup_internal` / `lookup_external`** (lines 51-85): the two "faces" of a connection (app-real vs peer-visible tuple), both scoped by `net_ns`.
+- **`connection_create` / `connection_done`** (lines 87-134): allocate (double-checked under write lock) / unlink + free.
+- **`inject_ip`** (lines 136-172): build an skb and transmit via `ip_route_me_harder` + `ip_local_out`; refuses to fragment. ⚠️ see [[#6. Known Bugs / Rough Edges]] — it touches `skb` before `alloc_skb`.
+- **`inject_tcp`** (lines 174-220): wrap a synthesized `tcphdr` in IP, set src/dst by verdict (RESET/RECOVER look like they come *from the peer*; ACK looks like it comes *from the app*), compute checksums, inject.
+- **`inject_update`** (lines 222-244): bounce a `tcpr_ip4` back to the control client over UDP.
+- **`tcpr_tg_update` / `tcpr_tg_application` / `tcpr_tg_peer`** (lines 246-413): the three dispatch paths — see [[#3. Kernel Dispatch Path]].
+- **`tcpr_tg`** + **`tcpr_tg_reg`** + init/exit (lines 415-467): the xtables target registration, hooked on `LOCAL_IN | LOCAL_OUT`, `--addr` passed as `targinfo`.
+
+### A.3 `module/libxt_TCPR.c` — the iptables userspace plugin
+Implements `-j TCPR [--addr IP]`: `parse` converts the address with `xtables_numeric_to_ipaddr`; `print`/`save` round-trip it for `iptables -L`/`iptables-save`. The target data is a single `uint32_t` address (0 = peer-side rule).
+
+### A.4 `src/` userspace tools (all are `tcpr_ip4` stream filters)
+
+| File | What it does | Key line |
+|------|--------------|----------|
+| `util.c` | `resolve_address`, `connect_to_tcpr` (reads `TCPR_HOST`/`TCPR_PORT`, UDP), `get_tcpr_state` (send ident → recv full state) | 35-93 |
+| `get.c` | Build an identifying `tcpr_ip4` from `SRCPORT [HOST PORT]`, fetch state, write to stdout | — |
+| `put.c` | Read records from stdin, `send()` each to the module (PUT) | — |
+| `print.c` | Human-readable dump of every field (`inet_ntop`, `ntohl`/`ntohs`) | 18-70 |
+| `ack.c` | Advance `hard.ack` by N bytes (or all received), bounded by live `ack` | 20-24 |
+| `done.c` | Set `done_reading`/`done_writing` (`r`/`w` arg) or force `done` | — |
+| `kill.c` | Set `failed = 1` (forces a reset on next packet) | — |
+| `bind.c` | Stamp `state.address` + `tcpr.port` from `HOST PORT` | — |
+
+### A.5 `src/chat.c` — the reference application (`tcpr-chat`)
+
+This is the canonical example of **how a real app drives checkpointing**. It's a netcat-like relay between stdin/stdout and a TCP socket, plus a UDP control socket to TCPR.
+
+- **`setup_tcpr`** (244-290): opens the UDP control socket (`-t`); if absent, disables checkpointing.
+- **`setup_state`** (292-306): sends the identifying tuple, receives current state (this is what makes `recover` reattach to an existing connection).
+- **`handle_events`** (318-445): a `select()` loop. The TCPR-relevant parts:
+  - **On receive** (346-369): after reading `n` bytes from the peer, if checkpointing, **advance `hard.ack` by `n` and push to TCPR** (lines 350-351) — i.e., only acknowledge data the app has actually taken. On EOF, set `done_reading` and push.
+  - **On send completion / EOF** (392-421): set `done_writing` and push before `shutdown(SHUT_WR)`.
+- **Recovery** happens implicitly: run the same binary with the same `-b/-c/-t`; `setup_state` pulls existing state, the kernel sees the new SYN as a recovery, and the chat continues.
+
+> [!example] The checkpoint discipline in one place
+> `chat.c:349-352` is the whole correctness contract: advance `hard.ack` **after** the data is in the app's buffer, then tell TCPR. Advance too early → data loss on crash; too late → the peer buffers more and latency grows.
+
+### A.6 `src/bridge.c` — a *recoverable* two-client bridge
+
+Shows a stateful server that survives its **own** restart by persisting connection metadata to a memory-mapped file:
+- **`setup`** (74-101): `mmap` a state file at `/var/tmp/tcpr-bridge-<bind>.state`. If it already exists → `recovering = 1`.
+- **`setup_connections`** (first run) `accept`s two clients; **`recover_connections`** (after a crash) re-`bind`s to the saved local addresses and re-`connect`s — TCPR then splices these onto the still-open peer connections.
+- **`handle_events`** (256-322): forwards bytes each way, advancing each side's `hard.ack` as data is relayed (284-285) and setting `done_reading`/`done_writing` on EOF — same discipline as `chat.c`, duplicated per client.
+
+### A.7 `src/benchmark.c`, `examples/`
+`benchmark.c` is a throughput harness (bulk generate/discard via the same `-g`/`-d` flags seen in `chat.c`). The `examples/recover` and `examples/migrate` shell scripts wire up network namespaces + a bridge and invoke these tools — see [[#The demo (`examples/recover`)]].
 
 ---
 
