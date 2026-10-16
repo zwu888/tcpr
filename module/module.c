@@ -8,6 +8,11 @@
 #include <linux/netfilter/x_tables.h>
 #include <net/route.h>
 #include <net/ip.h>
+#include <linux/version.h>
+#include <net/netfilter/nf_nat.h>
+#include <linux/netdevice.h>
+#include <net/net_namespace.h>
+#include <linux/nsproxy.h>
 
 #include <tcpr/types.h>
 #include <tcpr/filter.h>
@@ -131,6 +136,7 @@ static void connection_done(struct connection *c)
 static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
 {
 	struct sk_buff *skb;
+	struct net *net = dev_net(oldskb->dev);
 
 	skb = alloc_skb(LL_MAX_HEADER + ntohs(ip->tot_len), GFP_ATOMIC);
 	if (skb == NULL) {
@@ -145,7 +151,7 @@ static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
 	memcpy(skb->data, ip, ntohs(ip->tot_len));
 	skb->ip_summed = CHECKSUM_NONE;
 	skb_dst_set(skb, dst_clone(skb_dst(oldskb)));
-	if (ip_route_me_harder(skb, RTN_UNSPEC) < 0) {
+	if (ip_route_me_harder(net, NULL, skb, RTN_UNSPEC) < 0) {
 		if (net_ratelimit())
 			printk(KERN_WARNING "TCPR cannot route\n");
 		kfree_skb(skb);
@@ -158,7 +164,9 @@ static void inject_ip(struct iphdr *ip, struct sk_buff *oldskb)
 		return;
 	}
 
-	ip_local_out(skb);
+   // Fix: Updated API call with correct parameters
+    ip_local_out(net, NULL, skb);
+	//ip_local_out(skb);
 }
 
 static void inject_tcp(struct connection *c, enum tcpr_verdict tcpr_verdict, struct sk_buff *oldskb)
@@ -403,33 +411,45 @@ static unsigned int tcpr_tg_peer(struct sk_buff *skb, struct net *net_ns)
 }
 
 static unsigned int tcpr_tg(struct sk_buff *skb,
-			    const struct xt_action_param *par)
+                          const struct xt_action_param *par)
 {
-	const uint32_t *address = par->targinfo;
-	struct net *net_ns = dev_net(par->in ? par->in : par->out);
+    const uint32_t *address = par->targinfo;
+    // Fix: Get network namespace from the state
+    struct net *net_ns = dev_net(skb->dev);
+    
+    // If skb->dev is NULL, try to get network namespace from current
+    if (!net_ns) {
+        net_ns = current->nsproxy->net_ns;
+    }
 
-	if (!skb_make_writable(skb, skb->len))
-		return NF_DROP;
-	if (*address)
-		return tcpr_tg_application(skb, *address, net_ns);
-	else
-		return tcpr_tg_peer(skb, net_ns);
+    if (!skb_try_make_writable(skb, skb->len))
+        return NF_DROP;
+
+    if (*address)
+        return tcpr_tg_application(skb, *address, net_ns);
+    else
+        return tcpr_tg_peer(skb, net_ns);
 }
 
 static struct xt_target tcpr_tg_reg = {
-	.name = "TCPR",
-	.family = AF_INET,
-	.target = tcpr_tg,
-	.targetsize = sizeof(uint32_t),
-	.me = THIS_MODULE,
+    .name = "TCPR",
+    .family = AF_INET,
+    .target = tcpr_tg,
+    .targetsize = sizeof(uint32_t),
+    .me = THIS_MODULE,
+    .hooks = (1 << NF_INET_LOCAL_IN) | (1 << NF_INET_LOCAL_OUT),
 };
+
 
 static int __init tcpr_tg_init(void)
 {
-	rwlock_init(&connections_lock);
-	INIT_LIST_HEAD(&connections);
-	return xt_register_target(&tcpr_tg_reg);
+    rwlock_init(&connections_lock);
+    INIT_LIST_HEAD(&connections);
+
+    // Register with support for network namespaces
+    return xt_register_target(&tcpr_tg_reg);
 }
+
 
 static void __exit tcpr_tg_exit(void)
 {
