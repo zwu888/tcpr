@@ -32,6 +32,7 @@ aliases:
     - [[#7.8 Running it safely — kernel module + VM sandbox]]
     - [[#7.9 How many VMs do you need?]]
     - [[#7.10 `examples/relay/` script reference]]
+- [[#8. TCPR vs PROFINET — can it manage communication relationships?]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
@@ -914,6 +915,65 @@ The crash-proof relay demo ([[#7.3 Demo 1 — Crash-proof relay with end-to-end 
 | `recv` / `send` | unmodified `nc` receiver / sender clients |
 | `verify` | sha256 compare `/tmp/in.dat` vs `/tmp/out.dat` (PASS = no loss) |
 | `watch-state` | live `tcpr-get \| tcpr-print` loop |
+
+---
+
+## 8. TCPR vs PROFINET — can it manage communication relationships?
+
+> [!failure] Short answer: no
+> TCPR recovers **TCP pipes** across an endpoint crash. PROFINET **Application Relationships (ARs)** and the **Communication Relationships (CRs)** inside them are **real-time Layer-2 Ethernet + DCE/RPC-over-UDP**, not TCP. Different layer, different timing domain, different deployment model — TCPR cannot manage ARs/CRs.
+
+### 8.1 Why it doesn't fit
+
+TCPR only ever acts on **TCP** (reads/rewrites TCP headers, sequence numbers, options via a netfilter hook; the UDP side-channel is purely its own control protocol). PROFINET relationships live almost entirely *below* IP or on UDP/RPC:
+
+| PROFINET element | Transport | TCPR applicable? |
+|---|---|---|
+| Cyclic I/O Data CR (RT/IRT) | **Layer-2 Ethernet**, EtherType `0x8892` (no IP) | ❌ TCPR never sees it |
+| AR establishment / Context Mgmt ("Connect") | **DCE/RPC over UDP** (port 34964) | ❌ not TCP |
+| Alarm CR, Record Data CR | RT (L2) / RPC | ❌ |
+| DCP, PTCP (IRT sync), LLDP | Layer-2 `0x8892` | ❌ |
+| Device web server, SNMP, OPC UA | **TCP/IP** | ⚠️ only *these* are TCP |
+
+```mermaid
+flowchart TB
+    subgraph PN["PROFINET stack"]
+        direction TB
+        L2["Cyclic RT/IRT I/O data<br/>L2 EtherType 0x8892 — no IP"]:::no
+        RPC["AR / CR Context Mgmt<br/>DCE/RPC over UDP 34964"]:::no
+        DCP["DCP · PTCP · LLDP<br/>L2 0x8892"]:::no
+        TCP["Ancillary: HTTP · SNMP · OPC UA<br/>TCP/IP"]:::maybe
+    end
+    TCPR{{"TCPR<br/>operates on TCP only"}}:::tcpr
+    L2  -.->|invisible| TCPR
+    RPC -.->|invisible| TCPR
+    DCP -.->|invisible| TCPR
+    TCP --> TCPR
+    classDef no fill:#ffe0e0,stroke:#c33;
+    classDef maybe fill:#fff4e0,stroke:#d90;
+    classDef tcpr fill:#e0f7e9,stroke:#2a7;
+```
+
+### 8.2 Two more deal-breakers
+
+1. **Determinism.** PROFINET RT is cyclic (typ. 1 ms, down to 250 µs; IRT to 31.25 µs with hardware scheduling). TCPR inserts an in-path middlebox that **drops originals and injects/rewrites** packets, adding latency and jitter — incompatible with hard real-time cyclic exchange. You cannot put a store-and-forward recovery proxy in the RT path.
+2. **Deployment model.** TCPR is a research-grade Linux kernel module + iptables target. PROFINET IO-Controllers (e.g. S7-1500 PLCs) and IO-Devices are embedded real-time endpoints, not Linux netfilter boxes you can front with a TCPR gateway.
+
+### 8.3 What actually manages/protects PROFINET relationships
+
+Use PROFINET's purpose-built availability mechanisms instead:
+
+- **MRP (Media Redundancy Protocol, IEC 62439-2)** — ring redundancy, sub-200 ms media recovery.
+- **System / controller redundancy — S2, R1, R2** — redundant ARs to redundant IO-Controllers; the device keeps a relationship to a backup controller.
+- **PRP / HSR (IEC 62439-3)** — seamless (zero-recovery-time) frame duplication for highest availability.
+- **AR watchdog / data-hold times** in the PROFINET stack itself handle controller or link restarts and AR re-establishment.
+
+### 8.4 The only sliver where a TCPR-like idea could touch PROFINET
+
+The **ancillary TCP services** beside a device — embedded **HTTP web server**, **OPC UA over TCP**, engineering/diagnostic sessions. In principle TCP recovery could keep such an endpoint alive across a process restart. Even so it's a poor choice: OPC UA already has SecureChannel/session resumption, those links are rarely availability-critical, and introducing an experimental netfilter middlebox into an automation network is inadvisable.
+
+> [!note] Bottom line
+> Wrong layer (L2/RPC vs TCP), wrong timing domain (hard real-time vs best-effort), wrong deployment (embedded endpoints vs Linux middlebox). For AR/CR availability, reach for **MRP, S2/R1/R2, or PRP/HSR** — not TCPR.
 
 ---
 
