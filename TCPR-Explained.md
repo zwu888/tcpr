@@ -28,6 +28,7 @@ aliases:
 - [[#4. Userspace Control Protocol & Demo]]
 - [[#5. Ideal Use Cases]]
 - [[#6. Known Bugs / Rough Edges]]
+- [[#7. Building Non-Trivial Demos]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
@@ -567,6 +568,112 @@ Because `recover` reuses the identical 4-tuple, the new SYN hits the **existing*
 > - **Use-after-free race:** `connection_done` frees the `connection` while code still holds `c->tcpr_lock`, which lives *inside* the freed struct (`/* XXX race */` comments at module.c:301, 350, 411).
 > - **Peer path never uses `NF_ACCEPT`:** `tcpr_tg_peer` relies on drop-original + `inject_ip` copy; the default `verdict = NF_DROP` is never overwritten.
 > - **Kernel-API churn:** hand-patched "Fix" comments around `ip_local_out` and namespace handling indicate sensitivity to kernel version.
+
+---
+
+## 7. Building Non-Trivial Demos
+
+### 7.1 The mental model (what a demo must respect)
+
+> [!important] TCPR recovers the **pipe**, not your **app's memory**
+> TCPR restores the TCP connection and makes the peer retransmit everything past `hard.ack`. But the recovering process must know **where to resume**. `tcpr-chat` re-reads stdin from the *start* on restart, so a naïve `tcpr-chat < bigfile` + crash + rerun will **replay the file from byte 0** — the connection survives but the app state didn't.
+
+A compelling demo therefore needs one of:
+1. An app that **persists its own position** alongside the TCPR checkpoint — exactly what `tcpr-bridge` ([[#A.6 `src/bridge.c` — a *recoverable* two-client bridge]]) does via an `mmap`'d state file, **or**
+2. A workload where "resume from scratch" is fine (a generator/benchmark, `tcpr-chat -g`), **or**
+3. Protecting a **different component's** crash than the one producing the data.
+
+The existing `examples/recover/setup-network` (two netns — `application`, `peer` — over a bridge, with the TCPR module on the host) is the right sandbox for all of these.
+
+### 7.2 Demo topology
+
+```mermaid
+flowchart LR
+    subgraph HOST["Host (TCPR module loaded)"]
+        subgraph APPNS["netns: application (192.0.2.1)"]
+            APP["protected app<br/>tcpr-bridge / tcpr-chat"]
+        end
+        BR{{"bridge 'tcpr' 192.0.2.3<br/>iptables -j TCPR"}}
+        subgraph PEERNS["netns: peer (192.0.2.2)"]
+            P1["client / peer<br/>(nc, tcpr-chat)"]
+        end
+        APP <--> BR <--> P1
+    end
+    CTRL["control: TCPR_HOST=192.0.2.2 PORT=7777<br/>tcpr-get | ack | put | print"]
+    CTRL -. "UDP intercepted by<br/>--physdev-in application -p udp" .-> BR
+```
+
+### 7.3 Demo 1 — Crash-proof relay with end-to-end integrity check *(recommended)*
+
+The demo `bridge.c` was built for: a stateful relay crashes mid-transfer and both **unmodified `nc`** clients survive; a checksum proves no byte was lost.
+
+```sh
+# host
+cd examples/recover && sudo ./setup-network && sudo ./setup-tcpr
+head -c 200M /dev/urandom > /tmp/in.dat && sha256sum /tmp/in.dat
+
+# the recoverable relay (application netns)
+sudo ip netns exec application tcpr-bridge -b 192.0.2.1:8888 -t 192.0.2.2:7777
+
+# receiver + sender clients (peer netns)
+sudo ip netns exec peer sh -c 'nc 192.0.2.1 8888 > /tmp/out.dat'
+sudo ip netns exec peer sh -c 'nc 192.0.2.1 8888 < /tmp/in.dat'
+
+# ---- MID-TRANSFER: ^C the relay, then rerun the SAME command ----
+sudo ip netns exec application tcpr-bridge -b 192.0.2.1:8888 -t 192.0.2.2:7777
+#   -> sees /var/tmp/tcpr-bridge-*.state, recovering=1, re-binds + reconnects,
+#      TCPR splices the connections back on, relaying continues.
+
+sha256sum /tmp/out.dat   # MUST match /tmp/in.dat
+```
+Demonstrates **server restart transparent to unmodified clients** + the **no-data-loss invariant** (`bridge.c` advances `hard.ack` only after relaying each chunk, so the peer retransmits anything the crashed relay hadn't forwarded).
+
+### 7.4 Demo 2 — Bulk throughput with mid-stream failover *(quantified)*
+
+`tcpr-chat` has a load generator (`-g BYTES`), a sink (`-d`), and stats (`-v`).
+
+```sh
+# peer: sink + report
+sudo ip netns exec peer tcpr-chat -b 192.0.2.2:9999 -d -v
+# application: generate 1 GiB through TCPR, with checkpointing
+sudo ip netns exec application tcpr-chat -b 192.0.2.1:8888 -c 192.0.2.2:9999 \
+     -t 192.0.2.2:7777 -g 1073741824 -v
+# ^C partway, then rerun to resume the stream
+```
+Add realism with `tc netem` on the bridge (`tc qdisc add dev tcpr root netem delay 20ms`) and compare Mbps before/after recovery. The repo's `netperf-2.4.5-tcpr.patch` lets you run a standard `TCP_STREAM`/`TCP_RR` benchmark through TCPR for **publication-style numbers**.
+
+### 7.5 Demo 3 — Live migration to a replica *(extend `examples/migrate`)*
+
+`examples/migrate` already migrates a connection between two application replicas via Open vSwitch + `tcpr-control` (`-s` save / `-r` restore + flow-table rewrite). Non-trivial extensions:
+- Migrate **under active load** (combine with Demo 2) → zero connection drop.
+- Chain `app1 → app2 → app1` to show repeatability.
+- Kill `tcpr1` (the gateway's TCPR instance) to demonstrate the **middlebox-is-the-SPOF** failure mode (motivates HA'ing the TCPR box).
+
+### 7.6 Demo 4 — Front an unmodified real service
+
+Put a real server (echo/HTTP/Redis) in `application` and a real client in `peer`. Since the server doesn't speak the control protocol, use `tcpr-chat -C` (bypass checkpointing) as a shim, or drive checkpoints externally:
+
+```sh
+# advance the checkpoint for a live connection on port 8888:
+TCPR_HOST=192.0.2.2 TCPR_PORT=7777 sh -c 'tcpr-get 8888 | tcpr-ack | tcpr-put'
+# inspect state live:
+TCPR_HOST=192.0.2.2 TCPR_PORT=7777 sh -c 'tcpr-get 8888 | tcpr-print'
+```
+> [!warning] Honest caveat
+> Without app-integrated checkpointing you survive the *connection* but not the *application state* — best for stateless/idempotent services.
+
+### 7.7 Making it "demo-grade"
+
+- **Visual proof:** side pane running `watch -n0.5 'TCPR_HOST=192.0.2.2 TCPR_PORT=7777 sh -c "tcpr-get 8888 | tcpr-print"'` so the audience *sees* `delta`, `hard.ack`, and the `failed`/`done` flags flip at crash/recovery.
+- **Packet proof:** `sudo ip netns exec peer tcpdump -ni eth0 tcp` shows the peer never sees a RST or re-handshake — just a brief pause then continued flow.
+- **Automate it:** wrap each as `setup / run / fault / recover / verify / teardown` scripts mirroring `examples/*`, with `verify` = the sha256 compare.
+
+> [!tip] Quick-start checklist
+> 1. `apt-get install autoconf libtool iptables-dev` → `autoreconf -i` → build userspace + xtables lib.
+> 2. Build + `insmod`/`modprobe tcpr`; confirm with `modinfo tcpr`.
+> 3. `./setup-network && ./setup-tcpr` (from `examples/recover`).
+> 4. Run a demo above; watch state with `tcpr-get | tcpr-print`.
+> 5. `./teardown-tcpr && ./teardown-network` to clean up.
 
 ---
 
