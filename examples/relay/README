@@ -10,6 +10,35 @@ Topology (see ../recover for the same style):
     [ peer netns 192.0.2.2 ]  <--bridge-->  [ application netns 192.0.2.1 ]
       nc sender / receiver        TCPR           tcpr-bridge (recoverable)
 
+Run in a VM (recommended)
+-------------------------
+
+TCPR loads an experimental netfilter module; a bug could panic the kernel.
+Run the whole demo inside a throwaway KVM guest so only the guest is at risk.
+
+One-time host prereqs (need sudo):
+
+  sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils
+  sudo usermod -aG kvm "$USER"      # then log out/in (or: newgrp kvm)
+
+Boot the guest (downloads a Debian 12 cloud image on first run):
+
+  ./vm-setup                        # serial console; login: debian / tcpr
+
+cloud-init auto-builds + installs TCPR inside the guest (against the GUEST
+kernel) from this repo, shared read-only over 9p. When /root/TCPR_READY
+exists, run the demo inside the guest:
+
+  sudo -i
+  cd /root/tcpr/examples/relay
+  # follow "Running on bare metal" below (modprobe tcpr already works)
+
+  ./vm-destroy                      # remove the VM disk when finished
+
+
+Running on bare metal
+---------------------
+
 Prerequisites: the userspace tools are built and installed (see ../../README),
 and you are root.
 

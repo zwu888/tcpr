@@ -1,0 +1,82 @@
+#! /bin/sh
+# Launch a throwaway Debian 12 KVM guest (QEMU + cloud-init) that auto-builds
+# TCPR and is ready to run the relay demo SAFELY (a guest kernel panic cannot
+# take down this workstation).
+#
+# Prereqs (one-time, need sudo):
+#   sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils
+#   sudo usermod -aG kvm "$USER"   # then re-login (or: newgrp kvm)
+#
+# Usage:   ./vm-setup            (downloads image on first run, then boots)
+# Env:     RAM_MB, VCPUS, DISK, TCPR_VM_DIR to override defaults.
+set -e
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
+work=${TCPR_VM_DIR:-$HOME/.local/share/tcpr-vm}
+ram=${RAM_MB:-2048}
+cpus=${VCPUS:-2}
+disk=${DISK:-20G}
+img_url=https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+base=$work/debian12-base.qcow2
+overlay=$work/demo.qcow2
+seed=$work/seed.iso
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; miss=1; }; }
+miss=0; need qemu-system-x86_64; need qemu-img
+command -v cloud-localds >/dev/null 2>&1 || command -v genisoimage >/dev/null 2>&1 \
+  || { echo "Missing: cloud-localds (cloud-image-utils) or genisoimage" >&2; miss=1; }
+[ "$miss" = 1 ] && { echo "Install prereqs (see header), then re-run." >&2; exit 1; }
+
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  echo "WARNING: no access to /dev/kvm. Add yourself: sudo usermod -aG kvm $USER" >&2
+  echo "         then re-login. Falling back to SLOW emulation (no -enable-kvm)." >&2
+  accel=""
+else
+  accel="-enable-kvm -cpu host"
+fi
+
+mkdir -p "$work"
+
+if [ ! -f "$base" ]; then
+  echo "Downloading Debian 12 cloud image ..."
+  if command -v wget >/dev/null 2>&1; then wget -O "$base.part" "$img_url"
+  else curl -L -o "$base.part" "$img_url"; fi
+  mv "$base.part" "$base"
+fi
+
+if [ ! -f "$overlay" ]; then
+  echo "Creating overlay disk ($disk) ..."
+  qemu-img create -f qcow2 -F qcow2 -b "$base" "$overlay" "$disk" >/dev/null
+fi
+
+echo "Building cloud-init seed ..."
+if command -v cloud-localds >/dev/null 2>&1; then
+  cloud-localds "$seed" "$here/vm-cloud-init.yaml" "$here/vm-meta-data.yaml"
+else
+  tmp=$(mktemp -d); cp "$here/vm-cloud-init.yaml" "$tmp/user-data"
+  cp "$here/vm-meta-data.yaml" "$tmp/meta-data"
+  genisoimage -output "$seed" -volid cidata -joliet -rock "$tmp/user-data" "$tmp/meta-data" >/dev/null 2>&1
+  rm -rf "$tmp"
+fi
+
+cat <<MSG
+
+Booting guest (serial console; login: debian / tcpr).
+  * The guest shares THIS repo read-only at 9p tag 'tcpr' and copies it to
+    /root/tcpr, then builds + installs TCPR automatically (cloud-init).
+  * Watch progress:   tail -f /var/log/tcpr-build.log   (inside the guest)
+  * Ready when:       /root/TCPR_READY exists
+  * Run the demo:     sudo -i; cd /root/tcpr/examples/relay; see README
+  * Shut down guest:  sudo poweroff     (or Ctrl-a x to kill QEMU)
+  * Delete the VM:    ./vm-destroy
+
+MSG
+
+exec qemu-system-x86_64 $accel \
+  -smp "$cpus" -m "$ram" \
+  -drive file="$overlay",if=virtio \
+  -drive file="$seed",if=virtio,format=raw \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -virtfs local,path="$repo",mount_tag=tcpr,security_model=none,readonly=on \
+  -nographic

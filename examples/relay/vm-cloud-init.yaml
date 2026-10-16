@@ -1,0 +1,50 @@
+#cloud-config
+# Auto-provision a Debian 12 guest to build + run the TCPR relay demo.
+hostname: tcpr-demo
+ssh_pwauth: true
+users:
+  - name: debian
+    groups: [sudo]
+    shell: /bin/bash
+    lock_passwd: false
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+# login on the serial console:  debian / tcpr
+chpasswd:
+  expire: false
+  list: |
+    debian:tcpr
+    root:tcpr
+
+write_files:
+  - path: /root/guest-build.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # Build + install TCPR inside the guest, against the GUEST kernel.
+      exec >>/var/log/tcpr-build.log 2>&1
+      set -x
+      modprobe 9pnet_virtio 2>/dev/null || true
+      mkdir -p /mnt/tcpr
+      mount -t 9p -o trans=virtio,version=9p2000.L,ro tcpr /mnt/tcpr \
+        || mount -t 9p -o trans=virtio,ro tcpr /mnt/tcpr
+      rm -rf /root/tcpr
+      cp -a /mnt/tcpr /root/tcpr
+      cd /root/tcpr
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential autoconf libtool pkg-config iptables \
+        netcat-openbsd ethtool "linux-headers-$(uname -r)" libxtables-dev \
+        || DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        build-essential autoconf libtool pkg-config iptables \
+        netcat-openbsd ethtool "linux-headers-$(uname -r)" iptables-dev
+      autoreconf -i
+      rm -rf build && mkdir build && cd build
+      ../configure && make && make install && ldconfig
+      cd /root/tcpr/module
+      make clean || true
+      make && make install && depmod
+      echo READY > /root/TCPR_READY
+      echo "TCPR demo ready. See examples/relay/README. Build log: /var/log/tcpr-build.log"
+
+runcmd:
+  - [ sh, -c, "/root/guest-build.sh" ]

@@ -1,0 +1,6 @@
+#! /bin/sh
+# Remove the throwaway demo VM's disk/seed (keeps the downloaded base image).
+work=${TCPR_VM_DIR:-$HOME/.local/share/tcpr-vm}
+rm -f "$work/demo.qcow2" "$work/seed.iso"
+echo "Removed demo overlay + seed in $work"
+echo "(Base image kept: $work/debian12-base.qcow2 — delete manually to reclaim ~350MB)"
