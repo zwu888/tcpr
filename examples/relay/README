@@ -1,0 +1,50 @@
+Crash-proof relay demo
+======================
+
+Demonstrates that a stateful relay server (tcpr-bridge) can CRASH and RECOVER
+mid-transfer without either client (plain `nc`, no TCPR awareness) noticing,
+and proves no data was lost with an end-to-end checksum.
+
+Topology (see ../recover for the same style):
+
+    [ peer netns 192.0.2.2 ]  <--bridge-->  [ application netns 192.0.2.1 ]
+      nc sender / receiver        TCPR           tcpr-bridge (recoverable)
+
+Prerequisites: the userspace tools and kernel module are built and installed
+(see ../../README), and you are root.
+
+Steps (use several terminals):
+
+  # terminal 0 (host)
+  ./setup-network
+  ./setup-tcpr
+  ./make-payload 200M        # writes /tmp/in.dat and prints its sha256
+
+  # terminal 1 - the recoverable relay
+  ./server
+
+  # terminal 2 - receiver client (connect FIRST)
+  ./recv
+
+  # terminal 3 - sender client
+  ./send
+
+  # ---- MID-TRANSFER: kill the relay in terminal 1 (^C), then: ----
+  ./recover                  # tcpr-bridge reloads its state file and resumes
+
+  # optional, in a spare terminal: watch the state change live
+  ./watch-state
+
+  # when the transfer finishes:
+  ./verify                   # PASS => /tmp/out.dat is byte-identical to /tmp/in.dat
+
+Cleanup:
+
+  ./teardown-tcpr
+  ./teardown-network
+
+Notes:
+  - tcpr-bridge persists connection metadata to
+    /var/tmp/tcpr-bridge-192.0.2.1:8888.state; teardown-network removes it.
+  - The clients are unmodified `nc` - the whole point is peer transparency.
+  - `watch-state` uses the control tools: tcpr-get | tcpr-print.

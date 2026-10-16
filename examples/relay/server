@@ -1,0 +1,5 @@
+#! /bin/sh
+# The recoverable relay. tcpr-bridge persists its state to
+# /var/tmp/tcpr-bridge-<bind>.state, so re-running this exact command
+# after a crash RECOVERS both client connections instead of starting fresh.
+exec ip netns exec application tcpr-bridge -b 192.0.2.1:8888 -t 192.0.2.2:7777

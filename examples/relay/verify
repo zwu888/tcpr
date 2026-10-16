@@ -1,0 +1,13 @@
+#! /bin/sh
+# Prove no byte was lost across the crash/recovery.
+a=$(sha256sum /tmp/in.dat  | cut -d' ' -f1)
+b=$(sha256sum /tmp/out.dat | cut -d' ' -f1)
+echo "in : $a"
+echo "out: $b"
+if [ "$a" = "$b" ]; then
+	echo "PASS: output is byte-identical to input"
+	exit 0
+else
+	echo "FAIL: mismatch ($(stat -c%s /tmp/in.dat) vs $(stat -c%s /tmp/out.dat) bytes)"
+	exit 1
+fi

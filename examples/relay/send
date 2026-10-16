@@ -1,0 +1,4 @@
+#! /bin/sh
+# Sender client: streams /tmp/in.dat through the relay to the receiver.
+# Create the file first:  head -c 200M /dev/urandom > /tmp/in.dat
+exec ip netns exec peer sh -c 'nc 192.0.2.1 8888 < /tmp/in.dat'

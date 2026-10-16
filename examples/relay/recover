@@ -1,0 +1,5 @@
+#! /bin/sh
+# Run this AFTER killing ./server mid-transfer. tcpr-bridge finds its state
+# file, sets recovering=1, re-binds the saved local ports and reconnects;
+# TCPR splices the live connections back on and relaying continues.
+exec ip netns exec application tcpr-bridge -b 192.0.2.1:8888 -t 192.0.2.2:7777

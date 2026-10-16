@@ -1,0 +1,4 @@
+#! /bin/sh
+# Receiver client: connects to the relay and saves what it receives.
+# Start this BEFORE ./send so it becomes one of the two bridged clients.
+exec ip netns exec peer sh -c 'nc 192.0.2.1 8888 > /tmp/out.dat'

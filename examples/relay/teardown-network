@@ -1,0 +1,7 @@
+#! /bin/sh
+ip link delete application
+ip link delete peer
+ip link delete tcpr
+ip netns delete application
+ip netns delete peer
+rm -f /var/tmp/tcpr-bridge-192.0.2.1:8888.state

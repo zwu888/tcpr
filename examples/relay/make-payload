@@ -1,0 +1,6 @@
+#! /bin/sh
+# Generate a random test file and print its hash.
+SIZE=${1:-200M}
+head -c "$SIZE" /dev/urandom > /tmp/in.dat
+echo "Wrote /tmp/in.dat ($SIZE)"
+sha256sum /tmp/in.dat

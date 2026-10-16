@@ -1,0 +1,6 @@
+#! /bin/sh
+# Load the TCPR module and protect traffic in/out of the 'application' netns.
+modprobe tcpr
+iptables -t mangle -A FORWARD -m physdev --physdev-is-bridged --physdev-in application -p tcp -j TCPR --addr 192.0.2.1
+iptables -t mangle -A FORWARD -m physdev --physdev-is-bridged --physdev-in application -p udp -j TCPR --addr 192.0.2.1
+iptables -t mangle -A FORWARD -m physdev --physdev-is-bridged --physdev-out application -p tcp -j TCPR
