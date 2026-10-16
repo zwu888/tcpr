@@ -29,6 +29,8 @@ aliases:
 - [[#5. Ideal Use Cases]]
 - [[#6. Known Bugs / Rough Edges]]
 - [[#7. Building Non-Trivial Demos]]
+    - [[#7.8 Running it safely — kernel module + VM sandbox]]
+    - [[#7.9 `examples/relay/` script reference]]
 - [[#Appendix A — File-by-File Code Deep Dive]]
 - [[#Glossary]]
 
@@ -746,6 +748,72 @@ TCPR_HOST=192.0.2.2 TCPR_PORT=7777 sh -c 'tcpr-get 8888 | tcpr-print'
 > 3. `./setup-network && ./setup-tcpr` (from `examples/recover`).
 > 4. Run a demo above; watch state with `tcpr-get | tcpr-print`.
 > 5. `./teardown-tcpr && ./teardown-network` to clean up.
+
+### 7.8 Running it safely — kernel module + VM sandbox
+
+> [!danger] Run the demo in a VM, not on your workstation
+> TCPR loads an **experimental out-of-tree netfilter module**. `inject_ip` is on the hot path, and the known **`connection_done` use-after-free race** ([[#6. Known Bugs / Rough Edges]]) can **oops/panic the host kernel** — on a desktop that means a hang/reboot and lost work. A guest kernel panic only kills the guest.
+
+**Kernel-module version matching.** `tcpr.ko` must match the *running* kernel's **vermagic** or it won't load. A prebuilt `.ko` for another kernel fails with a version-magic error.
+
+```sh
+modinfo tcpr | grep vermagic      # must equal `uname -r`
+```
+
+`examples/relay/install-module` rebuilds against the running kernel (in a clean temp dir, since `module/` may hold root-owned artifacts) and installs so `modprobe tcpr` works:
+
+```sh
+sudo ./install-module             # build tcpr.ko for `uname -r`, install, depmod
+```
+
+> [!note] `inject_ip` fix shipped
+> The committed module drops a stray `skb_reserve()` that ran **before** `alloc_skb` (uninitialized `skb` — see [[#6. Known Bugs / Rough Edges]]). Without it the module oopses on the first injected packet. The compiler flagged it as `-Wuninitialized`; it is fixed in the current tree.
+
+**The VM sandbox** (`examples/relay/vm-setup` + `vm-cloud-init.yaml`): boots a throwaway Debian 12 KVM guest, shares this repo **read-only over 9p**, and cloud-init auto-builds + installs TCPR against the **guest** kernel.
+
+```mermaid
+flowchart TB
+    subgraph HOST["Host workstation (protected)"]
+        REPO[("tcpr repo<br/>working tree")]
+        QEMU["qemu-system-x86_64 -enable-kvm"]
+        subgraph GUEST["KVM guest: Debian 12 (disposable)"]
+            CI["cloud-init<br/>build + install TCPR"]
+            KO["tcpr.ko loaded in<br/>GUEST kernel"]
+            DEMO["examples/relay demo<br/>runs entirely in guest netns"]
+            CI --> KO --> DEMO
+        end
+        REPO -. "9p read-only<br/>mount_tag=tcpr" .-> CI
+        QEMU --- GUEST
+    end
+    PANIC{{"kernel oops / panic"}}:::bad -. "contained to guest" .-> GUEST
+    classDef bad fill:#ffe0e0,stroke:#c33;
+```
+
+Workflow (only the two `sudo apt-get`/`usermod` lines are manual host setup):
+```sh
+sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils
+sudo usermod -aG kvm "$USER"      # then re-login (or: newgrp kvm)
+cd examples/relay && ./vm-setup   # serial console, login: debian / tcpr
+# inside guest, once /root/TCPR_READY exists:
+sudo -i; cd /root/tcpr/examples/relay; ./setup-network && ./setup-tcpr && ...
+# host, when done: ./vm-destroy
+```
+
+### 7.9 `examples/relay/` script reference
+
+The crash-proof relay demo ([[#7.3 Demo 1 — Crash-proof relay with end-to-end integrity check *(recommended)*]]) ships as runnable scripts:
+
+| Script | Role |
+|--------|------|
+| `vm-setup` / `vm-destroy` | boot / delete the KVM demo guest (safe sandbox) |
+| `install-module` | build + install `tcpr.ko` for the running kernel |
+| `setup-network` / `teardown-network` | create / destroy the `application`+`peer` netns + bridge |
+| `setup-tcpr` / `teardown-tcpr` | load module + install TCPR iptables rules / reverse |
+| `make-payload [SIZE]` | write `/tmp/in.dat` and print its sha256 |
+| `server` / `recover` | run / re-run the recoverable `tcpr-bridge` relay |
+| `recv` / `send` | unmodified `nc` receiver / sender clients |
+| `verify` | sha256 compare `/tmp/in.dat` vs `/tmp/out.dat` (PASS = no loss) |
+| `watch-state` | live `tcpr-get \| tcpr-print` loop |
 
 ---
 
